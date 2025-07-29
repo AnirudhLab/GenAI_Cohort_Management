@@ -15,8 +15,8 @@ def test_get_db_connection(mock_st, mock_psycopg2):
             "host": "localhost",
             "port": "5432",
             "dbname": "testdb",
-            "user": "testuser",
-            "password": "testpassword"
+            "user": "",
+            "password": ""
         }
     }
 
