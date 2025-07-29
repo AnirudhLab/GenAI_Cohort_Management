@@ -6,3 +6,5 @@ werkzeug>=3.0.0
 yagmail>=0.15.293
 requests>=2.31.0
 psycopg2-binary>=2.9.9
+pytest>=8.3.2
+pytest-mock>=3.14.0

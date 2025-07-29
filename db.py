@@ -61,7 +61,7 @@ def create_tables():
             "Anything else?" TEXT,
             "Willing to mentor future cohorts?" BOOLEAN,
             "Status" VARCHAR(255),
-            "Team" VARCHAR(255) REFERENCES "Teams"("TeamName"),
+            "Team" VARCHAR(255),
             "PasswordHash" VARCHAR(255)
         )
         """,
@@ -70,7 +70,7 @@ def create_tables():
             id SERIAL PRIMARY KEY,
             "ProjectName" VARCHAR(255) UNIQUE,
             "ProjectInfo" TEXT,
-            "AssignedTeam" VARCHAR(255) REFERENCES "Teams"("TeamName"),
+            "AssignedTeam" VARCHAR(255),
             "CreatedAt" TIMESTAMP,
             "CurrentPhase" VARCHAR(255),
             "Progress" INTEGER
@@ -80,8 +80,8 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS "Updates" (
             "UpdateID" VARCHAR(255) PRIMARY KEY,
             "Timestamp" TIMESTAMP,
-            "Team" VARCHAR(255) REFERENCES "Teams"("TeamName"),
-            "Email" VARCHAR(255) REFERENCES "Participants_list"("Email"),
+            "Team" VARCHAR(255),
+            "Email" VARCHAR(255),
             "Update" TEXT,
             "Phase" VARCHAR(255)
         )
@@ -89,24 +89,24 @@ def create_tables():
         """
         CREATE TABLE IF NOT EXISTS "Comments" (
             id SERIAL PRIMARY KEY,
-            "UpdateID" VARCHAR(255) REFERENCES "Updates"("UpdateID"),
+            "UpdateID" VARCHAR(255),
             "Timestamp" TIMESTAMP,
-            "Email" VARCHAR(255) REFERENCES "Participants_list"("Email"),
+            "Email" VARCHAR(255),
             "Comment" TEXT
         )
         """,
         """
         CREATE TABLE IF NOT EXISTS "Likes" (
             id SERIAL PRIMARY KEY,
-            "UpdateID" VARCHAR(255) REFERENCES "Updates"("UpdateID"),
-            "Email" VARCHAR(255) REFERENCES "Participants_list"("Email"),
+            "UpdateID" VARCHAR(255),
+            "Email" VARCHAR(255),
             UNIQUE ("UpdateID", "Email")
         )
         """,
         """
         CREATE TABLE IF NOT EXISTS "ProjectProgress" (
             id SERIAL PRIMARY KEY,
-            "ProjectName" VARCHAR(255) REFERENCES "Projects"("ProjectName"),
+            "ProjectName" VARCHAR(255),
             "Phase" VARCHAR(255),
             "Status" VARCHAR(255),
             "StartDate" DATE,
@@ -114,9 +114,22 @@ def create_tables():
             "Comments" TEXT
         )
         """,
+        """
+        ALTER TABLE "Participants_list" ADD CONSTRAINT fk_team FOREIGN KEY ("Team") REFERENCES "Teams"("TeamName") ON DELETE SET NULL;
+        """,
+        """
+        ALTER TABLE "Projects" ADD CONSTRAINT fk_assigned_team FOREIGN KEY ("AssignedTeam") REFERENCES "Teams"("TeamName") ON DELETE SET NULL;
+        """
     )
     for command in commands:
-        execute_query(command)
+        try:
+            execute_query(command)
+        except Exception as e:
+            if "already exists" in str(e) or "multiple primary keys" in str(e):
+                conn = get_db_connection()
+                conn.rollback()
+            else:
+                raise e
 
 if __name__ == "__main__":
     create_tables()
