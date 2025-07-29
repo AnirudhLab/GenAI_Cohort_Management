@@ -1,20 +1,18 @@
 import streamlit as st
 import pandas as pd
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from werkzeug.security import check_password_hash, generate_password_hash
 import yagmail
 import os
 from datetime import datetime, timedelta
 import requests
 import json
+from db import execute_query
 
 # Initialize session state
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user_role = None
     st.session_state.user_email = None
-    st.session_state.gspread_client = None
     st.session_state.sheet_data_cache = {}
     st.session_state.last_sheet_refresh = {}
 
@@ -23,11 +21,7 @@ def validate_secrets():
     required_configs = {
         "admin": ["email", "password"],
         "gmail": ["sender_email", "app_password"],
-        "gspread": [
-            "type", "project_id", "private_key_id", "private_key",
-            "client_email", "client_id", "auth_uri", "token_uri"
-        ],
-        "google": ["google_sheet_url"]
+        "postgres": ["host", "port", "dbname", "user", "password"]
     }
     
     missing = []
@@ -40,27 +34,6 @@ def validate_secrets():
                 missing.append(f"Missing key in {section}: {key}")
     
     return missing
-
-def get_gspread_client():
-    """Gets or creates a cached gspread client"""
-    if st.session_state.gspread_client is not None:
-        return st.session_state.gspread_client
-        
-    try:
-        # Get the gspread credentials
-        creds_dict = dict(st.secrets["gspread"])
-        # Fix newlines in private key
-        if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-        
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        st.session_state.gspread_client = client
-        return client
-    except Exception as e:
-        st.error(f"Failed to initialize Google Sheets client: {str(e)}")
-        return None
 
 def check_admin_login(email, password):
     """Check admin credentials from secrets.toml"""
@@ -85,109 +58,13 @@ def check_admin_login(email, password):
 # Page Configuration
 st.set_page_config(page_title="GenAI Cohort Portal", layout="wide")
 
-# Cache duration in minutes
-CACHE_DURATION = 5
-
-def get_cached_sheet_data(sheet_name, worksheet):
-    """Gets sheet data from cache if valid, otherwise fetches from Google Sheets."""
-    current_time = datetime.now()
-    
-    # Check if we have cached data and it's still valid
-    if (sheet_name in st.session_state.sheet_data_cache and 
-        sheet_name in st.session_state.last_sheet_refresh and 
-        current_time - st.session_state.last_sheet_refresh[sheet_name] < timedelta(minutes=CACHE_DURATION)):
-        return st.session_state.sheet_data_cache[sheet_name]
-    
-    # If no valid cache, fetch data from Google Sheets
-    try:
-        data = worksheet.get_all_records()
-        # Update cache
-        st.session_state.sheet_data_cache[sheet_name] = data
-        st.session_state.last_sheet_refresh[sheet_name] = current_time
-        return data
-    except gspread.exceptions.APIError as e:
-        if "429" in str(e):  # Quota exceeded error
-            if sheet_name in st.session_state.sheet_data_cache:
-                st.warning(f"API quota exceeded. Using cached data from {st.session_state.last_sheet_refresh[sheet_name].strftime('%H:%M:%S')}")
-                return st.session_state.sheet_data_cache[sheet_name]
-            else:
-                st.error("API quota exceeded and no cached data available. Please wait a few minutes and try again.")
-                raise e
-        raise e
-    except Exception as e:
-        if sheet_name in st.session_state.sheet_data_cache:
-            st.warning(f"Failed to fetch fresh data, using cached data from {st.session_state.last_sheet_refresh[sheet_name].strftime('%H:%M:%S')}")
-            return st.session_state.sheet_data_cache[sheet_name]
-        raise e
+# Page Configuration
+st.set_page_config(page_title="GenAI Cohort Portal", layout="wide")
 
 def clear_cache():
     """Clears the sheet data cache."""
     st.session_state.sheet_data_cache = {}
     st.session_state.last_sheet_refresh = {}
-
-def get_sheet(sheet_name):
-    """Gets a specific worksheet, creating it with headers if it doesn't exist."""
-    client = get_gspread_client()
-    
-    # Use cached spreadsheet if available
-    if 'spreadsheet' not in st.session_state:
-        st.session_state.spreadsheet = client.open_by_url(st.secrets["google"]["google_sheet_url"])
-    spreadsheet = st.session_state.spreadsheet
-    
-    # Define headers for each sheet type
-    headers = {
-        "Teams": ["TeamName", "Description"],  # Store team information
-        "Participants_list": ["Name", "Email", "Preferred Name", "Experience Level", "Have GenAI Experience?", 
-                            "Background", "Why do you want to join?", "What are your goals?", "Role Preference 1",
-                            "Role Preference 2", "Skills for Role", "Can participate daily?", "Best Time to Meet",
-                            "Has computer & internet?", "Comfortable with Tools", "Other Tools Known", "Anything else?",
-                            "Willing to mentor future cohorts?", "Status", "Team"],
-        "Projects": ["ProjectName", "AssignedTeam", "ProjectInfo", "CreatedAt", "CurrentPhase", "Progress"],
-        "Updates": ["UpdateID", "Timestamp", "Team", "Email", "Update", "Phase"],
-        "Comments": ["UpdateID", "Timestamp", "Email", "Comment"],
-        "Likes": ["UpdateID", "Email"],
-        "ProjectProgress": ["ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments"]
-    }
-    
-    # Define SDLC phases
-    if 'sdlc_phases' not in st.session_state:
-        st.session_state.sdlc_phases = [
-            "Requirements",
-            "Design",
-            "Implementation",
-            "Testing",
-            "Deployment",
-            "Maintenance"
-        ]
-    
-    try:
-        # Use cached worksheet if available
-        if f'worksheet_{sheet_name}' not in st.session_state:
-            st.session_state[f'worksheet_{sheet_name}'] = spreadsheet.worksheet(sheet_name)
-        worksheet = st.session_state[f'worksheet_{sheet_name}']
-        
-        # For Participants_list, don't modify the existing structure
-        if sheet_name == "Participants_list":
-            return worksheet
-            
-        # For other sheets, check if headers match expected headers
-        current_headers = worksheet.row_values(1)
-        expected_headers = headers.get(sheet_name, [])
-        
-        # If headers don't match or are missing, update them
-        if current_headers != expected_headers:
-            # Clear the worksheet
-            worksheet.clear()
-            # Update headers
-            worksheet.append_row(expected_headers)
-            
-    except gspread.exceptions.WorksheetNotFound:
-        # Create new worksheet with correct headers
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1, cols=len(headers.get(sheet_name, [])))
-        worksheet.append_row(headers.get(sheet_name, []))
-        st.session_state[f'worksheet_{sheet_name}'] = worksheet
-    
-    return worksheet
 
 def send_email_notification(to_email, subject, message_text):
     """Send email using Gmail via yagmail"""
@@ -331,53 +208,31 @@ def show_admin_view():
     
     try:
         # Load participants first
-        participants_sheet = get_sheet("Participants_list")
-        if participants_sheet:
-            # Ensure PasswordHash column exists
-            add_password_column()
+        participants_data = execute_query('SELECT * FROM "Participants_list"', fetch="all")
+        if participants_data:
+            participants_df = pd.DataFrame(participants_data, columns=["id", "Name", "Email", "Preferred Name", "Experience Level", "Have GenAI Experience?", "Background", "Why do you want to join?", "What are your goals?", "Role Preference 1", "Role Preference 2", "Skills for Role", "Can participate daily?", "Best Time to Meet", "Has computer & internet?", "Comfortable with Tools", "Other Tools Known", "Anything else?", "Willing to mentor future cohorts?", "Status", "Team", "PasswordHash"])
             
-            participants_data = get_cached_sheet_data("Participants_list", participants_sheet)
-            if participants_data:
-                participants_df = pd.DataFrame(participants_data)
-                
-                # Clean the data - replace empty strings and NaN values
-                participants_df = participants_df.fillna("")
-                
-                # Filter out rows where Email is empty
-                participants_df = participants_df[
-                    (participants_df["Email"].astype(str).str.strip() != "")
-                ]
-                
-                # Use Preferred Name if available, otherwise use Name
-                participants_df["Display Name"] = participants_df["Preferred Name"].where(
-                    participants_df["Preferred Name"].astype(str).str.strip() != "",
-                    participants_df["Name"]
-                )
-                
-                # Add Team column if it doesn't exist
-                if "Team" not in participants_df.columns:
-                    participants_df["Team"] = ""
-                
-                # Fill empty team values with empty string
-                participants_df["Team"] = participants_df["Team"].fillna("").astype(str)
-                participants_df["Team"] = participants_df["Team"].replace({"nan": "", "None": "", "null": ""}).str.strip()
-                
-                # Ensure PasswordHash column exists in DataFrame
-                if "PasswordHash" not in participants_df.columns:
-                    participants_df["PasswordHash"] = ""
-            else:
-                st.warning("No participant data found. Please check the Participants_list sheet.")
-        
+            # Data cleaning
+            participants_df = participants_df.fillna("")
+            participants_df = participants_df[participants_df["Email"].astype(str).str.strip() != ""]
+            participants_df["Display Name"] = participants_df["Preferred Name"].where(participants_df["Preferred Name"].astype(str).str.strip() != "", participants_df["Name"])
+            if "Team" not in participants_df.columns:
+                participants_df["Team"] = ""
+            participants_df["Team"] = participants_df["Team"].fillna("").astype(str)
+            participants_df["Team"] = participants_df["Team"].replace({"nan": "", "None": "", "null": ""}).str.strip()
+            if "PasswordHash" not in participants_df.columns:
+                participants_df["PasswordHash"] = ""
+        else:
+            st.warning("No participant data found in the database.")
+            participants_df = pd.DataFrame()
+
         # Load teams
-        teams_sheet = get_sheet("Teams")
-        if teams_sheet:
-            teams_data = get_cached_sheet_data("Teams", teams_sheet)
-            teams_df = pd.DataFrame(teams_data) if teams_data else pd.DataFrame()
-            available_teams = [] if teams_df.empty else teams_df["TeamName"].tolist()
-    
+        teams_data = execute_query('SELECT "TeamName", "Description" FROM "Teams"', fetch="all")
+        teams_df = pd.DataFrame(teams_data, columns=["TeamName", "Description"]) if teams_data else pd.DataFrame(columns=["TeamName", "Description"])
+        available_teams = teams_df["TeamName"].tolist()
+
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
-        st.error("Please check your Google Sheets connection and permissions.")
+        st.error(f"Error loading data from database: {str(e)}")
         return
     
     with team_tab:
@@ -406,8 +261,7 @@ def show_admin_view():
                             if not teams_df.empty and new_team_name in teams_df["TeamName"].values:
                                 st.error("A team with this name already exists!")
                             else:
-                                new_team = [new_team_name, team_description]
-                                teams_sheet.append_row(new_team)
+                                execute_query('INSERT INTO "Teams" ("TeamName", "Description") VALUES (%s, %s)', (new_team_name, team_description))
                                 st.success(f"Team '{new_team_name}' created successfully!")
                                 clear_cache()
                                 st.rerun()
@@ -428,13 +282,10 @@ def show_admin_view():
                     if st.checkbox("Confirm deletion of " + team_to_delete):
                         try:
                             # Remove team assignments from participants
-                            if participants_df is not None:
-                                participants_df.loc[participants_df["Team"] == team_to_delete, "Team"] = ""
-                                participants_sheet.update([participants_df.columns.values.tolist()] + participants_df.values.tolist())
+                            execute_query('UPDATE "Participants_list" SET "Team" = NULL WHERE "Team" = %s', (team_to_delete,))
                             
-                            # Delete team from Teams sheet
-                            team_row = teams_df[teams_df["TeamName"] == team_to_delete].index[0] + 2  # +2 for header and 0-based index
-                            teams_sheet.delete_rows(team_row)
+                            # Delete team from Teams table
+                            execute_query('DELETE FROM "Teams" WHERE "TeamName" = %s', (team_to_delete,))
                             
                             st.success(f"Team '{team_to_delete}' deleted successfully!")
                             clear_cache()
@@ -531,26 +382,18 @@ def show_admin_view():
                             notifications_sent = []  # Track successful notifications
                             failed_notifications = []  # Track failed notifications
                             
-                            # Update DataFrame with team assignments
-                            for participant in selected_participants:
-                                # Get participant's email
-                                participant_row = participants_df[participants_df["Display Name"] == participant].iloc[0]
+                            # Update database with new team assignments
+                            for participant_name in selected_participants:
+                                participant_row = participants_df[participants_df["Display Name"] == participant_name].iloc[0]
                                 participant_email = participant_row["Email"]
                                 
-                                # Update team assignment
-                                participants_df.loc[
-                                    participants_df["Display Name"] == participant, 
-                                    "Team"
-                                ] = selected_team
+                                execute_query('UPDATE "Participants_list" SET "Team" = %s WHERE "Email" = %s', (selected_team, participant_email))
                                 
                                 # Try to send notification
-                                if notify_participant(participant_email, participant, selected_team):
-                                    notifications_sent.append(participant)
+                                if notify_participant(participant_email, participant_name, selected_team):
+                                    notifications_sent.append(participant_name)
                                 else:
-                                    failed_notifications.append(participant)
-
-                            # Update Google Sheet with new team assignments
-                            participants_sheet.update([participants_df.columns.values.tolist()] + participants_df.values.tolist())
+                                    failed_notifications.append(participant_name)
                             
                             # Show success message for team assignment
                             st.success(f"Successfully assigned {len(selected_participants)} participants to {selected_team}!")
@@ -694,18 +537,12 @@ def show_project_tab(participants_df, available_teams):
                 st.error("All fields are required!")
             else:
                 try:
-                    # Add project to Projects sheet
-                    projects_sheet = get_sheet("Projects")
+                    # Add project to Projects table
                     timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-                    new_project = [
-                        project_name,
-                        project_description,
-                        assigned_team,
-                        timestamp,  # CreatedAt
-                        "Requirements",  # CurrentPhase - start with first SDLC phase
-                        "0"  # Progress - start at 0%
-                    ]
-                    projects_sheet.append_row(new_project)
+                    execute_query(
+                        'INSERT INTO "Projects" ("ProjectName", "ProjectInfo", "AssignedTeam", "CreatedAt", "CurrentPhase", "Progress") VALUES (%s, %s, %s, %s, %s, %s)',
+                        (project_name, project_description, assigned_team, timestamp, "Requirements", 0)
+                    )
                     st.success(f"Project '{project_name}' created successfully!")
                     
                     # Send notifications if requested
@@ -746,21 +583,13 @@ def show_project_tab(participants_df, available_teams):
     # Display existing projects
     st.write("### Existing Projects")
     try:
-        projects_sheet = get_sheet("Projects")
-        projects_data = get_cached_sheet_data("Projects", projects_sheet)
+        projects_data = execute_query('SELECT "ProjectName", "ProjectInfo", "AssignedTeam", "CreatedAt", "CurrentPhase", "Progress" FROM "Projects"', fetch="all")
         
         if not projects_data:
             st.info("No projects created yet.")
             return
             
-        projects_df = pd.DataFrame(projects_data)
-        
-        # Ensure all required columns exist
-        if len(projects_df.columns) < 6:
-            st.error("Project data format is incorrect. Please contact admin.")
-            return
-            
-        projects_df.columns = ["Project Name", "Description", "Assigned Team", "Created At", "Current Phase", "Progress"]
+        projects_df = pd.DataFrame(projects_data, columns=["Project Name", "Description", "Assigned Team", "Created At", "Current Phase", "Progress"])
         
         # Group projects by team
         for team in available_teams:
@@ -820,8 +649,7 @@ def show_project_tab(participants_df, available_teams):
                             if st.button("Delete Project", key=f"delete_{project['Project Name']}", type="primary"):
                                 if st.checkbox(f"Confirm deletion of project: {project['Project Name']}", key=f"confirm_{project['Project Name']}"):
                                     try:
-                                        # Delete project from sheet (add 2 for header and 0-based index)
-                                        projects_sheet.delete_rows(idx + 2)
+                                        execute_query('DELETE FROM "Projects" WHERE "ProjectName" = %s', (project['Project Name'],))
                                         st.success(f"Project '{project['Project Name']}' deleted successfully!")
                                         clear_cache()
                                         st.rerun()
@@ -840,22 +668,18 @@ def show_updates_dashboard(user_email, user_role):
     
     try:
         # Load all required data
-        updates_sheet = get_sheet("Updates")
-        comments_sheet = get_sheet("Comments")
-        likes_sheet = get_sheet("Likes")
-        
-        updates_data = get_cached_sheet_data("Updates", updates_sheet)
-        comments_data = get_cached_sheet_data("Comments", comments_sheet)
-        likes_data = get_cached_sheet_data("Likes", likes_sheet)
+        updates_data = execute_query('SELECT "UpdateID", "Timestamp", "Team", "Email", "Update", "Phase" FROM "Updates"', fetch="all")
+        comments_data = execute_query('SELECT "UpdateID", "Timestamp", "Email", "Comment" FROM "Comments"', fetch="all")
+        likes_data = execute_query('SELECT "UpdateID", "Email" FROM "Likes"', fetch="all")
         
         if not updates_data:
             st.info("No updates posted yet.")
             return
             
         # Convert to DataFrames
-        updates_df = pd.DataFrame(updates_data)
-        comments_df = pd.DataFrame(comments_data) if comments_data else pd.DataFrame(columns=["UpdateID", "Timestamp", "Email", "Comment"])
-        likes_df = pd.DataFrame(likes_data) if likes_data else pd.DataFrame(columns=["UpdateID", "Email"])
+        updates_df = pd.DataFrame(updates_data, columns=["UpdateID", "Timestamp", "Team", "Email", "Update", "Phase"])
+        comments_df = pd.DataFrame(comments_data, columns=["UpdateID", "Timestamp", "Email", "Comment"]) if comments_data else pd.DataFrame(columns=["UpdateID", "Timestamp", "Email", "Comment"])
+        likes_df = pd.DataFrame(likes_data, columns=["UpdateID", "Email"]) if likes_data else pd.DataFrame(columns=["UpdateID", "Email"])
         
         # Add filter for teams
         teams = sorted(updates_df["Team"].unique())
@@ -894,15 +718,10 @@ def show_updates_dashboard(user_email, user_role):
                     ):
                         if already_liked:
                             # Remove like
-                            like_idx = likes_df[
-                                (likes_df["UpdateID"] == update["UpdateID"]) &
-                                (likes_df["Email"] == user_email)
-                            ].index[0]
-                            like_row = like_idx + 2  # Add 2 for header and 0-based index
-                            likes_sheet.delete_rows(like_row)
+                            execute_query('DELETE FROM "Likes" WHERE "UpdateID" = %s AND "Email" = %s', (update["UpdateID"], user_email))
                         else:
-                            # Add like using named parameters
-                            likes_sheet.append_row([update["UpdateID"], user_email])
+                            # Add like
+                            execute_query('INSERT INTO "Likes" ("UpdateID", "Email") VALUES (%s, %s)', (update["UpdateID"], user_email))
                         clear_cache()
                         st.rerun()
                     
@@ -926,13 +745,11 @@ def show_updates_dashboard(user_email, user_role):
                     new_comment = st.text_area("Add a comment:", key=f"comment_{update['UpdateID']}")
                     if st.form_submit_button("Post Comment"):
                         if new_comment.strip():
-                            # Add comment using named parameters
-                            comments_sheet.append_row([
-                                update["UpdateID"],
-                                pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                user_email,
-                                new_comment
-                            ])
+                            # Add comment
+                            execute_query(
+                                'INSERT INTO "Comments" ("UpdateID", "Timestamp", "Email", "Comment") VALUES (%s, %s, %s, %s)',
+                                (update["UpdateID"], pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), user_email, new_comment)
+                            )
                             clear_cache()
                             st.rerun()
                         else:
@@ -948,19 +765,16 @@ def show_project_progress_dashboard():
     
     try:
         # Load all required data
-        projects_sheet = get_sheet("Projects")
-        progress_sheet = get_sheet("ProjectProgress")
-        
-        projects_data = get_cached_sheet_data("Projects", projects_sheet)
-        progress_data = get_cached_sheet_data("ProjectProgress", progress_sheet)
-        
+        projects_data = execute_query('SELECT "ProjectName", "CurrentPhase", "Progress" FROM "Projects"', fetch="all")
+        progress_data = execute_query('SELECT "ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments" FROM "ProjectProgress"', fetch="all")
+
         if not projects_data:
             st.info("No projects created yet.")
             return
             
         # Convert to DataFrames
-        projects_df = pd.DataFrame(projects_data)
-        progress_df = pd.DataFrame(progress_data) if progress_data else pd.DataFrame(columns=["ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments"])
+        projects_df = pd.DataFrame(projects_data, columns=["ProjectName", "CurrentPhase", "Progress"])
+        progress_df = pd.DataFrame(progress_data, columns=["ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments"]) if progress_data else pd.DataFrame(columns=["ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments"])
         
         # Select project to view/update
         project_names = projects_df["ProjectName"].unique()
@@ -1045,42 +859,38 @@ def show_project_progress_dashboard():
                     
                     if submitted:
                         try:
-                            # Update project's current phase and progress
-                            project_idx = projects_df[projects_df["ProjectName"] == selected_project].index[0]
-                            project_row = project_idx + 2  # Add 2 for header and 0-based index
-                            
-                            # Update using named parameters to avoid range errors
-                            projects_sheet.update(
-                                range_name=f'E{project_row}',
-                                values=[[phase]],  # CurrentPhase
+                            # Update project's current phase and progress in the Projects table
+                            execute_query(
+                                'UPDATE "Projects" SET "CurrentPhase" = %s, "Progress" = %s WHERE "ProjectName" = %s',
+                                (phase, progress, selected_project)
                             )
-                            projects_sheet.update(
-                                range_name=f'F{project_row}',
-                                values=[[str(progress)]],  # Progress
+
+                            # Check if a progress entry for this phase already exists
+                            existing_progress = execute_query(
+                                'SELECT id FROM "ProjectProgress" WHERE "ProjectName" = %s AND "Phase" = %s',
+                                (selected_project, phase),
+                                fetch="one"
                             )
-                            
-                            # Update or add phase progress
-                            new_progress = [
-                                selected_project,
-                                phase,
-                                status,
-                                start_date.strftime("%Y-%m-%d"),
-                                end_date.strftime("%Y-%m-%d") if end_date else "",
-                                comments
-                            ]
-                            
-                            # Check if phase entry exists
-                            existing_progress = project_progress[project_progress["Phase"] == phase]
-                            if not existing_progress.empty:
+
+                            if existing_progress:
                                 # Update existing entry
-                                row_idx = existing_progress.index[0] + 2
-                                progress_sheet.update(
-                                    range_name=f'A{row_idx}:F{row_idx}',
-                                    values=[new_progress],
+                                execute_query(
+                                    """
+                                    UPDATE "ProjectProgress"
+                                    SET "Status" = %s, "StartDate" = %s, "EndDate" = %s, "Comments" = %s
+                                    WHERE "ProjectName" = %s AND "Phase" = %s
+                                    """,
+                                    (status, start_date, end_date.strftime("%Y-%m-%d") if end_date else None, comments, selected_project, phase)
                                 )
                             else:
-                                # Add new entry
-                                progress_sheet.append_row(new_progress)
+                                # Insert new entry
+                                execute_query(
+                                    """
+                                    INSERT INTO "ProjectProgress" ("ProjectName", "Phase", "Status", "StartDate", "EndDate", "Comments")
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                    """,
+                                    (selected_project, phase, status, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d") if end_date else None, comments)
+                                )
                             
                             st.success("Progress updated successfully!")
                             clear_cache()
@@ -1126,16 +936,14 @@ def show_participant_view():
                             st.error("Failed to change password. Please try again.")
         
         # Fetch data
-        participants_sheet = get_sheet("Participants_list")
-        participants_data = get_cached_sheet_data("Participants_list", participants_sheet)
-        participants_df = pd.DataFrame(participants_data)
+        participants_data = execute_query('SELECT * FROM "Participants_list" WHERE "Email" = %s', (user_email,), fetch="all")
+        participants_df = pd.DataFrame(participants_data, columns=["id", "Name", "Email", "Preferred Name", "Experience Level", "Have GenAI Experience?", "Background", "Why do you want to join?", "What are your goals?", "Role Preference 1", "Role Preference 2", "Skills for Role", "Can participate daily?", "Best Time to Meet", "Has computer & internet?", "Comfortable with Tools", "Other Tools Known", "Anything else?", "Willing to mentor future cohorts?", "Status", "Team", "PasswordHash"])
         
-        projects_sheet = get_sheet("Projects")
-        projects_data = get_cached_sheet_data("Projects", projects_sheet)
-        projects_df = pd.DataFrame(projects_data)
+        projects_data = execute_query('SELECT "ProjectName", "ProjectInfo", "AssignedTeam", "CurrentPhase", "Progress" FROM "Projects"', fetch="all")
+        projects_df = pd.DataFrame(projects_data, columns=["ProjectName", "ProjectInfo", "AssignedTeam", "CurrentPhase", "Progress"]) if projects_data else pd.DataFrame(columns=["ProjectName", "ProjectInfo", "AssignedTeam", "CurrentPhase", "Progress"])
         
         # Find user's team and project
-        user_info = participants_df[participants_df["Email"] == user_email].iloc[0]
+        user_info = participants_df.iloc[0]
         user_team = user_info["Team"]
         
         if not user_team:
@@ -1175,20 +983,15 @@ def show_participant_view():
             
             if submitted and update_text:
                 try:
-                    updates_sheet = get_sheet("Updates")
                     # Generate a unique ID for the update
                     update_id = f"upd_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}_{user_email}"
                     timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
                     
-                    # Add update using named parameters
-                    updates_sheet.append_row([
-                        update_id,
-                        timestamp,
-                        user_team,
-                        user_email,
-                        update_text,
-                        phase if phase else ""
-                    ])
+                    # Add update to the database
+                    execute_query(
+                        'INSERT INTO "Updates" ("UpdateID", "Timestamp", "Team", "Email", "Update", "Phase") VALUES (%s, %s, %s, %s, %s, %s)',
+                        (update_id, timestamp, user_team, user_email, update_text, phase if phase else "")
+                    )
                     st.success("Your update has been submitted successfully!")
                     clear_cache()
                 except Exception as e:
@@ -1199,93 +1002,26 @@ def show_participant_view():
 
 # --- 4. MAIN APP & LOGIN LOGIC ---
 
-def add_password_column():
-    """Add PasswordHash column to Participants_list sheet if it doesn't exist"""
-    try:
-        participants_sheet = get_sheet("Participants_list")
-        headers = participants_sheet.row_values(1)
-        
-        if "PasswordHash" not in headers:
-            # Add PasswordHash column
-            headers.append("PasswordHash")
-            # Get current number of columns
-            num_cols = len(headers)
-            # Add new column
-            participants_sheet.add_cols(1)
-            # Update headers
-            participants_sheet.update('A1', [headers])
-            # Initialize all password hashes as empty
-            data = participants_sheet.get_all_records()
-            for i, row in enumerate(data):
-                # Update just the new column
-                participants_sheet.update_cell(i+2, num_cols, "")
-            return True
-        return True
-    except Exception as e:
-        st.error(f"Failed to add password column: {str(e)}")
-        return False
-
 def reset_participant_password(email, new_password):
     """Reset password for a participant"""
     try:
-        participants_sheet = get_sheet("Participants_list")
-        data = participants_sheet.get_all_records()
-        headers = participants_sheet.row_values(1)
-        
-        # Ensure PasswordHash column exists
-        if "PasswordHash" not in headers:
-            if not add_password_column():
-                return False
-            headers = participants_sheet.row_values(1)
-        
-        # Find participant row
-        for i, row in enumerate(data):
-            if row.get("Email") == email:
-                # Generate new password hash
-                password_hash = generate_password_hash(new_password)
-                
-                # Update row with new password hash
-                row_data = [row.get(header, "") for header in headers]
-                password_col = headers.index("PasswordHash")
-                row_data[password_col] = password_hash
-                
-                # Update sheet (add 2 to account for 1-based indexing and header row)
-                participants_sheet.update(f'A{i+2}', [row_data])
-                return True
-                
-        return False
+        password_hash = generate_password_hash(new_password)
+        execute_query('UPDATE "Participants_list" SET "PasswordHash" = %s WHERE "Email" = %s', (password_hash, email))
+        return True
     except Exception as e:
         st.error(f"Failed to reset password: {str(e)}")
         return False
 
 def check_participant_login(email, password):
-    """Check participant credentials from Google Sheet"""
+    """Check participant credentials from the database"""
     try:
-        participants_sheet = get_sheet("Participants_list")
-        participants_data = get_cached_sheet_data("Participants_list", participants_sheet)
+        user_data = execute_query('SELECT "PasswordHash" FROM "Participants_list" WHERE "Email" = %s', (email,), fetch="one")
         
-        if not participants_data:
-            st.error("No participant data found.")
-            return False
-            
-        participants_df = pd.DataFrame(participants_data)
-        
-        if "Email" not in participants_df.columns:
-            st.error("Invalid participant data format. Please contact admin.")
-            return False
-        
-        user_record = participants_df[participants_df["Email"] == email]
-        
-        if user_record.empty:
+        if not user_data:
             st.error("Email not found. Please check your email or contact admin.")
             return False
         
-        # Check if user has a password hash
-        if "PasswordHash" not in participants_df.columns:
-            st.error("Password authentication not set up. Please contact admin.")
-            return False
-        
-        user_password_hash = user_record.iloc[0].get("PasswordHash")
+        user_password_hash = user_data[0]
         if not user_password_hash:
             st.error("Password not set. Please contact admin to reset your password.")
             return False
@@ -1306,32 +1042,9 @@ def change_participant_password(email, current_password, new_password):
             return False
             
         # Then update to new password
-        participants_sheet = get_sheet("Participants_list")
-        data = participants_sheet.get_all_records()
-        headers = participants_sheet.row_values(1)
-        
-        # Ensure PasswordHash column exists
-        if "PasswordHash" not in headers:
-            if not add_password_column():
-                return False
-            headers = participants_sheet.row_values(1)
-        
-        # Find participant row
-        for i, row in enumerate(data):
-            if row.get("Email") == email:
-                # Generate new password hash
-                password_hash = generate_password_hash(new_password)
-                
-                # Update row with new password hash
-                row_data = [row.get(header, "") for header in headers]
-                password_col = headers.index("PasswordHash")
-                row_data[password_col] = password_hash
-                
-                # Update sheet (add 2 to account for 1-based indexing and header row)
-                participants_sheet.update(f'A{i+2}', [row_data])
-                return True
-                
-        return False
+        password_hash = generate_password_hash(new_password)
+        execute_query('UPDATE "Participants_list" SET "PasswordHash" = %s WHERE "Email" = %s', (password_hash, email))
+        return True
     except Exception as e:
         st.error(f"Failed to change password: {str(e)}")
         return False

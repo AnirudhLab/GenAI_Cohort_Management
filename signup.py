@@ -1,36 +1,8 @@
 import streamlit as st
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from db import execute_query
 
 # Configure page layout
 st.set_page_config(page_title="GenAI Cohort Signup", layout="wide")
-
-# Authenticate with Google Sheets using Streamlit Secrets
-def get_google_sheet():
-    try:
-        # Define scope
-        scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
-
-        # Fix private_key formatting from secrets
-        creds_dict = dict(st.secrets["gspread"])
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        # Authenticate and authorize
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-
-        # Load Sheet using [google] section
-        sheet_url = st.secrets["google"]["google_sheet_url"]
-        sheet = client.open_by_url(sheet_url).sheet1
-        return sheet
-
-    except Exception as e:
-        st.error("🔐 Google Sheet authentication failed.")
-        st.exception(e)
-        raise e
 
 # Title
 st.title("📝 AIEagles Sign Up for the GenAI Cohort")
@@ -57,31 +29,26 @@ mentor_future = st.checkbox("Willing to mentor future cohorts?")
 
 # Submit button
 if st.button("Submit"):
-    new_data = [
-        name,
-        email,
-        pref_name,
-        exp_level,
-        genai_exp,
-        ", ".join(background),
-        why_join,
-        goals,
-        role_pref1,
-        role_pref2,
-        skills,
-        available,
-        best_time,
-        has_pc,
-        ", ".join(tools),
-        other_tools,
-        additional_info,
-        mentor_future,
-        "Pending"
-    ]
-
     try:
-        sheet = get_google_sheet()
-        sheet.append_row(new_data)
+        execute_query(
+            """
+            INSERT INTO "Participants_list" (
+                "Name", "Email", "Preferred Name", "Experience Level", "Have GenAI Experience?",
+                "Background", "Why do you want to join?", "What are your goals?", "Role Preference 1",
+                "Role Preference 2", "Skills for Role", "Can participate daily?", "Best Time to Meet",
+                "Has computer & internet?", "Comfortable with Tools", "Other Tools Known", "Anything else?",
+                "Willing to mentor future cohorts?", "Status"
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT ("Email") DO NOTHING
+            """,
+            (
+                name, email, pref_name, exp_level, genai_exp,
+                ", ".join(background), why_join, goals,
+                role_pref1, role_pref2, skills,
+                available, best_time, has_pc, ", ".join(tools),
+                other_tools, additional_info, mentor_future, "Pending"
+            ),
+        )
         st.success("✅ Submitted successfully! Please wait for admin approval.")
     except Exception as e:
         st.error(f"❌ An error occurred while submitting: {e}")
