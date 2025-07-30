@@ -57,15 +57,12 @@ python --version
 pip install -r requirements.txt
 ```
 
-### 2. Google Sheets Setup
-1. Create a Google Cloud Project
-2. Enable Google Sheets API
-3. Create service account credentials
-4. Share your Google Sheet with the service account email
-5. Download service account JSON key
+### 2. Database Setup
+This application uses a PostgreSQL database.
 
-### 3. Configuration
-Create `.streamlit/secrets.toml` with the following structure:
+1. **Install PostgreSQL:** Make sure you have PostgreSQL installed and running.
+2. **Create a database:** Create a new database for the application.
+3. **Configure secrets:** Create a `.streamlit/secrets.toml` file with the following structure:
 ```toml
 [admin]
 email = "admin@example.com"
@@ -75,37 +72,28 @@ password = "your_admin_password"
 sender_email = "your_email@gmail.com"
 app_password = "your_gmail_app_password"
 
-[google]
-google_sheet_url = "your_google_sheet_url"
-
-[gspread]
-type = "service_account"
-project_id = "your_project_id"
-private_key_id = "your_private_key_id"
-private_key = "your_private_key"
-client_email = "your_client_email"
-client_id = "your_client_id"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "your_cert_url"
+[postgres]
+host = "localhost"
+port = 5432
+dbname = "your_database_name"
+user = "your_database_user"
+password = "your_database_password"
 ```
+
+### 3. Data Migration
+If you are migrating from a previous version that used Google Sheets, you can use the `migrate_data.py` script to move your data to the PostgreSQL database.
+
+1. **Configure Google Sheets credentials:** Make sure your `secrets.toml` file still contains the `[google]` and `[gspread]` sections with your Google Sheets API credentials.
+2. **Run the migration script:**
+```bash
+streamlit run migrate_data.py -- ?run_migration=true
+```
+This will create the necessary tables in your PostgreSQL database and migrate the data from your Google Sheet.
 
 ### 4. Running the Application
 ```bash
 streamlit run app.py
 ```
-
-## Google Sheets Structure
-
-The application uses the following sheets:
-1. **Participants_list**: Stores participant information and credentials
-2. **Teams**: Stores team information
-3. **Projects**: Stores project details and progress
-4. **Updates**: Stores team updates
-5. **Comments**: Stores comments on updates
-6. **Likes**: Stores likes on updates
-7. **ProjectProgress**: Stores detailed SDLC phase progress
 
 ## Features for Participants
 
