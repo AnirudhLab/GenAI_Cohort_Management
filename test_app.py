@@ -11,7 +11,7 @@ st = MagicMock()
 db = MagicMock()
 
 # Now we can import the functions from app.py
-from app import check_admin_login, check_participant_login, reset_participant_password, change_participant_password
+from app import check_admin_login, check_participant_login, reset_participant_password, change_participant_password, execute_query
 
 def test_check_admin_login_success(mocker):
     mocker.patch('app.st.secrets', {
@@ -79,3 +79,29 @@ def test_change_participant_password_success(mocker):
 def test_change_participant_password_wrong_current_password(mocker):
     mocker.patch('app.check_participant_login', return_value=False)
     assert change_participant_password("participant@test.com", "wrong_old_password", "new_password") == False
+
+from app import create_participant
+
+def test_create_participant_success(mocker):
+    # Simulate that the participant does not exist
+    mock_execute_query = mocker.patch('app.execute_query')
+    mock_execute_query.return_value = None
+
+    result = create_participant("New Participant", "new@test.com", "Team A")
+
+    assert result == True
+    mock_execute_query.assert_any_call('SELECT "Email" FROM "Participants_list" WHERE "Email" = %s', ('new@test.com',), fetch="one")
+    mock_execute_query.assert_any_call(
+        'INSERT INTO "Participants_list" ("Name", "Email", "Team", "Status") VALUES (%s, %s, %s, %s)',
+        ('New Participant', 'new@test.com', 'Team A', 'Pending')
+    )
+
+def test_create_participant_already_exists(mocker):
+    # Simulate that the participant already exists
+    mock_execute_query = mocker.patch('app.execute_query')
+    mock_execute_query.return_value = ("new@test.com",)
+
+    result = create_participant("New Participant", "new@test.com", "Team A")
+
+    assert result == False
+    mock_execute_query.assert_called_once_with('SELECT "Email" FROM "Participants_list" WHERE "Email" = %s', ('new@test.com',), fetch="one")

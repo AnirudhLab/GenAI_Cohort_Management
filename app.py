@@ -190,6 +190,27 @@ The GenAI Cohort Admin Team"""
         return False
 
 # --- 2. ADMIN VIEW ---
+def create_participant(name, email, team):
+    """Create a new participant in the database."""
+    try:
+        # Check if participant email already exists
+        existing_participant = execute_query('SELECT "Email" FROM "Participants_list" WHERE "Email" = %s', (email,), fetch="one")
+        if existing_participant:
+            st.error("A participant with this email already exists!")
+            return False
+        else:
+            execute_query(
+                'INSERT INTO "Participants_list" ("Name", "Email", "Team", "Status") VALUES (%s, %s, %s, %s)',
+                (name, email, team if team else None, "Pending")
+            )
+            st.success(f"Participant '{name}' created successfully!")
+            clear_cache()
+            st.rerun()
+            return True
+    except Exception as e:
+        st.error(f"Failed to create participant: {str(e)}")
+        return False
+
 def show_admin_view():
     st.title("Admin Dashboard")
     
@@ -292,6 +313,20 @@ def show_admin_view():
                             st.rerun()
                         except Exception as e:
                             st.error(f"Failed to delete team: {str(e)}")
+
+        st.write("### Create New Participant")
+        with st.form("create_participant"):
+            st.write("#### Create New Participant")
+            new_participant_name = st.text_input("Participant Name")
+            new_participant_email = st.text_input("Participant Email")
+            assigned_team = st.selectbox("Assign to Team", [""] + available_teams)
+            submit_participant = st.form_submit_button("Create Participant")
+
+            if submit_participant:
+                if not new_participant_name or not new_participant_email:
+                    st.error("Participant name and email are required!")
+                else:
+                    create_participant(new_participant_name, new_participant_email, assigned_team)
         
         # Display current team assignments
         st.write("### Current Team Assignments")

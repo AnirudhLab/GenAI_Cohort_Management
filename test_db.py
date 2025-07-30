@@ -6,6 +6,11 @@ st = MagicMock()
 # We need to mock psycopg2 as we don't want to connect to a real database
 psycopg2 = MagicMock()
 
+@pytest.fixture(autouse=True)
+def clear_cache():
+    from db import get_db_connection
+    get_db_connection.clear()
+
 @patch('db.psycopg2')
 @patch('db.st')
 def test_get_db_connection(mock_st, mock_psycopg2):
